@@ -229,7 +229,7 @@ def _iter_mod_paths_in_folder(root: Path, recursive: bool) -> List[Path]:
         for p in globs(pattern):
             if not p.is_file():
                 continue
-            if p.name.startswith("_"):
+            if p.name.startswith("_") or p.name == "manifest.json":
                 continue
             out.append(p.resolve())
     return sorted(set(out))
@@ -1114,7 +1114,7 @@ def _list_mod_files_in_dir(directory: str) -> List[Path]:
         return []
     jsons = sorted(Path(directory).glob("*.json"))
     mods = sorted(Path(directory).glob("*.modpatch"))
-    return [p for p in (list(jsons) + list(mods)) if not p.name.startswith("_")]
+    return [p for p in (list(jsons) + list(mods)) if not p.name.startswith("_") and p.name != "manifest.json"]
 
 
 def _all_mods_in_dir(directory: str) -> List[Path]:
@@ -1567,6 +1567,9 @@ def load_modpatches(mods_dir):
         try:
             with open(path, 'r', encoding='utf-8-sig') as f:
                 mod = json.load(f)
+            # Skip manifest files (crimson_browser_mod_v1 format)
+            if mod.get("format") == "crimson_browser_mod_v1":
+                continue
             mod['_path'] = path
             mods.append(mod)
         except (json.JSONDecodeError, OSError) as e:
