@@ -1472,7 +1472,7 @@ def build_multi_pamt(files, paz_data_len):
                 f['comp_size'],
                 f['decomp_size'],
                 0,       # paz_index (always 0)
-                0x0002,  # flags: LZ4 compressed
+                f.get('flags', 0x0002),  # preserve original flags
             ))
             file_index += 1
 
@@ -1644,51 +1644,76 @@ def cmd_apply():
     for m in mods:
         print(f"  - {m.get('name', '?')}")
 
-    # ── Step 2: Group all changes by game_file ──
+    # ── Step 2: Group all changes by game_file, track source_group per file ──
     # merged[game_file] = list of (mod_name, change)
     merged = defaultdict(list)
+    file_source_group = {}  # game_file -> source_group
     for mod in mods:
         mod_name = mod.get("name", "?")
         for patch in mod.get("patches", []):
             gf = patch["game_file"]
+            sg = patch.get("source_group", SOURCE_GROUP)
+            file_source_group.setdefault(gf, sg)
             for change in patch["changes"]:
                 merged[gf].append((mod_name, change))
 
     print(f"\nTarget files ({len(merged)}):")
     for gf, changes in sorted(merged.items()):
         mods_involved = sorted(set(m for m, _ in changes))
-        print(f"  {gf}: {len(changes)} patches from [{', '.join(mods_involved)}]")
+        sg = file_source_group.get(gf, SOURCE_GROUP)
+        print(f"  {gf} [{sg}]: {len(changes)} patches from [{', '.join(mods_involved)}]")
 
-    # ── Step 3: Build file index from 0008 PAMT ──
-    print(f"\nReading {SOURCE_GROUP}/0.pamt...")
-    pamt_info = read_pamt_raw(pamt_path)
-    file_index, full_index = build_file_index(pamt_info)
+    # ── Step 3: Build file index per source_group ──
+    pamt_cache = {}  # source_group -> (file_index, full_index)
+    for sg in sorted(set(file_source_group.values())):
+        sg_pamt = os.path.join(GAME_DIR, sg, '0.pamt')
+        if not os.path.isfile(sg_pamt):
+            error(f"PAMT not found: {sg}/0.pamt")
+            continue
+        print(f"\nReading {sg}/0.pamt...")
+        sg_info = read_pamt_raw(sg_pamt)
+        pamt_cache[sg] = build_file_index(sg_info)
 
     # ── Step 4: For each game file, load original → patch → compress ──
     paz_buf = bytearray()
     overlay_files = []  # for PAMT builder
 
     for game_file, changes in sorted(merged.items()):
-        info = resolve_game_file(game_file, file_index, full_index)
-        if info is None:
-            print(f"\n  ERROR: Cannot find '{game_file}' in {SOURCE_GROUP}/0.pamt!")
+        sg = file_source_group.get(game_file, SOURCE_GROUP)
+        if sg not in pamt_cache:
+            print(f"\n  ERROR: No PAMT loaded for group {sg}!")
+            print(f"  Skipping {game_file}...")
+            continue
+        file_index, full_index = pamt_cache[sg]
+
+        info_obj = resolve_game_file(game_file, file_index, full_index)
+        if info_obj is None:
+            print(f"\n  ERROR: Cannot find '{game_file}' in {sg}/0.pamt!")
             print(f"  Skipping...")
             continue
 
-        fr = info['record']
-        full_path = info['full_path']
-        dir_path = info['dir_path']
-        filename = info['filename']
+        fr = info_obj['record']
+        full_path = info_obj['full_path']
+        dir_path = info_obj['dir_path']
+        filename = info_obj['filename']
 
         print(f"\n  Processing: {full_path}")
-        print(f"    Source: {SOURCE_GROUP}/{fr['paz_index']}.paz @ 0x{fr['paz_offset']:08X}")
+        print(f"    Source: {sg}/{fr['paz_index']}.paz @ 0x{fr['paz_offset']:08X}")
         print(f"    Size: {fr['comp_size']} compressed, {fr['decomp_size']} decompressed")
+        print(f"    Flags: 0x{fr['flags']:04X}")
 
-        # Read original compressed data
-        src_paz = os.path.join(GAME_DIR, SOURCE_GROUP, f"{fr['paz_index']}.paz")
+        # Read original data from the correct source group
+        src_paz = os.path.join(GAME_DIR, sg, f"{fr['paz_index']}.paz")
         with open(src_paz, 'rb') as f:
             f.seek(fr['paz_offset'])
             comp_data = f.read(fr['comp_size'])
+
+        # Decrypt if encrypted (flags upper nibble: 3 = ChaCha20)
+        encryption = (fr['flags'] >> 4) & 0x0F
+        if encryption == 3:
+            from crimson_crypto import decrypt_chacha20, encrypt_chacha20
+            print(f"    Decrypting (ChaCha20)...")
+            comp_data = decrypt_chacha20(comp_data, filename)
 
         # Decompress
         buf = bytearray(lz4.block.decompress(comp_data, uncompressed_size=fr['decomp_size']))
@@ -1722,6 +1747,12 @@ def cmd_apply():
         new_comp = lz4.block.compress(bytes(buf), store_size=False)
         print(f"    Recompressed: {len(buf)} -> {len(new_comp)} bytes")
 
+        # Re-encrypt if original was encrypted
+        if encryption == 3:
+            from crimson_crypto import encrypt_chacha20
+            new_comp = encrypt_chacha20(new_comp, filename)
+            print(f"    Re-encrypted (ChaCha20)")
+
         # Add to PAZ buffer
         paz_offset = len(paz_buf)
         paz_buf += new_comp
@@ -1737,6 +1768,7 @@ def cmd_apply():
             'comp_size': len(new_comp),
             'decomp_size': fr['decomp_size'],
             'paz_offset': paz_offset,
+            'flags': fr['flags'],
         })
 
     if not overlay_files:
