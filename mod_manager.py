@@ -498,6 +498,12 @@ def _clear_active_mods():
     for f in _enabled_mod_files_ordered():
         f.unlink()
         n += 1
+    # Also remove file-replacement mod directories
+    for fm in load_file_replacement_mods(MODS_DIR):
+        p = Path(fm["_path"])
+        if p.is_dir():
+            shutil.rmtree(p)
+            n += 1
     return n
 
 
@@ -577,7 +583,7 @@ def _sync_game_after_enabled_change(game_opt: Optional[str] = None) -> bool:
     print()
     info(f"Game packages: {GAME_DIR}")
     print()
-    if load_modpatches(MODS_DIR):
+    if load_modpatches(MODS_DIR) or load_file_replacement_mods(MODS_DIR):
         cmd_apply()
     else:
         cmd_uninstall()
@@ -761,7 +767,8 @@ def cmd_status(game_opt: Optional[str] = None):
     )
     if overlay_active:
         mods = load_modpatches(MODS_DIR)
-        if not mods:
+        file_mods = load_file_replacement_mods(MODS_DIR)
+        if not mods and not file_mods:
             info("Applied mods: (none — overlay exists but mods/enabled/ is empty)")
         else:
             info("Applied mods (from mods/enabled/):")
@@ -771,6 +778,9 @@ def cmd_status(game_opt: Optional[str] = None):
                 print(
                     f"    - {mod.get('name', '?')} ({mod_file}): {total_changes} changes"
                 )
+            for fmod in file_mods:
+                title = fmod.get("title", "?")
+                print(f"    - {title} (file-replacement)")
     else:
         info("Applied mods: vanilla (0036 overlay not active yet). Run `apply` to patch.")
 
@@ -804,9 +814,9 @@ def run_wizard():
         info(f"Game packages: {GAME_DIR}")
 
     def _wizard_summary():
-        n_avail = len(_list_mod_files_in_dir(MODS_AVAILABLE_DIR))
-        n_enabled = len(_enabled_mod_files_ordered())
-        n_disabled = len(_list_mod_files_in_dir(MODS_DISABLED_DIR))
+        n_avail = len(_all_mods_in_dir(MODS_AVAILABLE_DIR))
+        n_enabled = len(_all_mods_in_dir(MODS_DIR))
+        n_disabled = len(_all_mods_in_dir(MODS_DISABLED_DIR))
         print(f"{Style.DIM}  Mods: {n_avail} available, {n_enabled} enabled, {n_disabled} disabled{Style.RESET}")
 
     print()
@@ -1107,33 +1117,54 @@ def _list_mod_files_in_dir(directory: str) -> List[Path]:
     return [p for p in (list(jsons) + list(mods)) if not p.name.startswith("_")]
 
 
+def _all_mods_in_dir(directory: str) -> List[Path]:
+    """List all mods in a directory: .json/.modpatch files + manifest directories."""
+    items = _list_mod_files_in_dir(directory)
+    if os.path.isdir(directory):
+        for entry in sorted(Path(directory).iterdir()):
+            if entry.is_dir() and (entry / "manifest.json").is_file():
+                items.append(entry)
+    return items
+
+
 def cmd_available():
     """List available (not yet enabled) mod files."""
-    files = _list_mod_files_in_dir(MODS_AVAILABLE_DIR)
+    files = _all_mods_in_dir(MODS_AVAILABLE_DIR)
     if not files:
         print("No mods in mods/available/")
         print(f"  Place .json modpatch files in: {MODS_AVAILABLE_DIR}")
         print(f"  Or use: install <folder>")
         return
-    enabled_names = {p.name.lower() for p in _enabled_mod_files_ordered()}
+    enabled_names = {p.name.lower() for p in _all_mods_in_dir(MODS_DIR)}
     print(f"Available mods ({len(files)}):")
     for i, p in enumerate(files, 1):
-        mod = _load_mod_from_path(p)
         status = f"{Style.YELLOW}[enabled]{Style.RESET}" if p.name.lower() in enabled_names else ""
-        if mod:
-            name = mod.get("name", "?")
-            desc = mod.get("description", "")[:60]
-            n_patches = sum(len(pa.get("changes", [])) for pa in mod.get("patches", []))
-            print(f"  {i}) {Style.CYAN}{p.name}{Style.RESET}  [{name}]  {n_patches} patch(es) {status}".rstrip())
-            if desc:
-                print(f"      {desc}")
+        if p.is_dir():
+            manifest = _detect_manifest_mod(p)
+            if manifest:
+                title = manifest.get("title", "?")
+                desc = manifest.get("description", "")[:60]
+                print(f"  {i}) {Style.CYAN}{p.name}{Style.RESET}  [{title}] {status}".rstrip())
+                if desc:
+                    print(f"      {desc}")
+            else:
+                print(f"  {i}) {p.name}  (directory) {status}".rstrip())
         else:
-            print(f"  {i}) {p.name}  (invalid JSON) {status}".rstrip())
+            mod = _load_mod_from_path(p)
+            if mod:
+                name = mod.get("name", "?")
+                desc = mod.get("description", "")[:60]
+                n_patches = sum(len(pa.get("changes", [])) for pa in mod.get("patches", []))
+                print(f"  {i}) {Style.CYAN}{p.name}{Style.RESET}  [{name}]  {n_patches} patch(es) {status}".rstrip())
+                if desc:
+                    print(f"      {desc}")
+            else:
+                print(f"  {i}) {p.name}  (invalid JSON) {status}".rstrip())
 
 
 def cmd_enable_mod(identifier: str) -> bool:
     """Move a mod from mods/disabled/ to mods/enabled/."""
-    files = _list_mod_files_in_dir(MODS_DISABLED_DIR)
+    files = _all_mods_in_dir(MODS_DISABLED_DIR)
     if not files:
         warn("mods/disabled/ is empty.")
         return False
@@ -1168,7 +1199,7 @@ def cmd_enable_mod(identifier: str) -> bool:
 
 def cmd_activate_available(identifier: str) -> bool:
     """Move a mod from mods/available/ to mods/enabled/."""
-    files = _list_mod_files_in_dir(MODS_AVAILABLE_DIR)
+    files = _all_mods_in_dir(MODS_AVAILABLE_DIR)
     if not files:
         warn("mods/available/ is empty.")
         return False
@@ -1203,18 +1234,23 @@ def cmd_activate_available(identifier: str) -> bool:
 
 def cmd_disabled_list():
     """List disabled mods."""
-    files = _list_mod_files_in_dir(MODS_DISABLED_DIR)
+    files = _all_mods_in_dir(MODS_DISABLED_DIR)
     if not files:
         print("No mods in mods/disabled/")
         return
     print(f"Disabled mods ({len(files)}):")
     for i, p in enumerate(files, 1):
-        mod = _load_mod_from_path(p)
-        if mod:
-            name = mod.get("name", "?")
-            print(f"  {i}) {Style.DIM}{p.name}{Style.RESET}  [{name}]")
+        if p.is_dir():
+            manifest = _detect_manifest_mod(p)
+            title = manifest.get("title", p.name) if manifest else p.name
+            print(f"  {i}) {Style.DIM}{p.name}{Style.RESET}  [{title}]")
         else:
-            print(f"  {i}) {p.name}  (invalid JSON)")
+            mod = _load_mod_from_path(p)
+            if mod:
+                name = mod.get("name", "?")
+                print(f"  {i}) {Style.DIM}{p.name}{Style.RESET}  [{name}]")
+            else:
+                print(f"  {i}) {p.name}  (invalid JSON)")
 
 
 def cmd_purge_mod(identifier: str) -> bool:
