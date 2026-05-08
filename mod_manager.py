@@ -369,6 +369,65 @@ def _select_install_variant(paths: List[Path], *, pick: bool, max_files: Optiona
     return None
 
 
+def _detect_manifest_mod(root: Path) -> Optional[dict]:
+    """Check if folder contains a crimson_browser_mod_v1 manifest.json."""
+    manifest = root / "manifest.json"
+    if not manifest.is_file():
+        return None
+    try:
+        with open(manifest, "r", encoding="utf-8-sig") as f:
+            data = json.load(f)
+        if data.get("format") == "crimson_browser_mod_v1":
+            return data
+    except (json.JSONDecodeError, OSError):
+        pass
+    return None
+
+
+def _install_manifest_mod(root: Path, force: bool = False, apply_after: bool = False, game_opt: Optional[str] = None) -> bool:
+    """Install a crimson_browser_mod_v1 mod (file replacement) by copying the folder."""
+    manifest = _detect_manifest_mod(root)
+    if not manifest:
+        return False
+    mod_id = manifest.get("id", root.name)
+    title = manifest.get("title", mod_id)
+
+    dest = Path(MODS_DIR) / mod_id
+    avail_dest = Path(MODS_AVAILABLE_DIR) / mod_id
+    existed = dest.exists()
+    if existed and not force:
+        warn(f"Already exists (skipped): {mod_id}  (use install --force to overwrite)")
+        return False
+
+    os.makedirs(MODS_DIR, exist_ok=True)
+    os.makedirs(MODS_AVAILABLE_DIR, exist_ok=True)
+
+    # Copy entire mod folder
+    if existed:
+        shutil.rmtree(dest)
+    if avail_dest.exists():
+        shutil.rmtree(avail_dest)
+    shutil.copytree(root, dest)
+    shutil.copytree(root, avail_dest)
+
+    success(f"Installed [{title}] → mods/enabled/{mod_id}/")
+    files_dir = manifest.get("files_dir", "files")
+    file_count = sum(1 for _ in (dest / files_dir).rglob("*") if _.is_file()) if (dest / files_dir).is_dir() else 0
+    info(f"  {file_count} replacement file(s)")
+
+    if not apply_after:
+        warn("Game not patched yet — run:  python3 mod_manager.py apply")
+    else:
+        if not init_game_dir(game_opt):
+            game_dir_help()
+            return False
+        print()
+        info(f"Game packages: {GAME_DIR}")
+        print()
+        cmd_apply()
+    return True
+
+
 def cmd_install_from_folder(
     folder: str,
     recursive: bool = True,
@@ -384,6 +443,12 @@ def cmd_install_from_folder(
     if not root.is_dir():
         error(f"Folder not found: {root}")
         return False
+
+    # Check for crimson_browser_mod_v1 manifest first
+    manifest = _detect_manifest_mod(root)
+    if manifest:
+        return _install_manifest_mod(root, force=force, apply_after=apply_after, game_opt=game_opt)
+
     paths = sorted(
         _iter_mod_paths_in_folder(root, recursive),
         key=lambda p: p.name.lower(),
@@ -1406,6 +1471,29 @@ def load_modpatches(mods_dir):
     return mods
 
 
+def load_file_replacement_mods(mods_dir):
+    """Load crimson_browser_mod_v1 mods (directory-based, file replacement)."""
+    mods = []
+    if not os.path.isdir(mods_dir):
+        return mods
+    for entry in sorted(Path(mods_dir).iterdir()):
+        if not entry.is_dir():
+            continue
+        manifest_path = entry / "manifest.json"
+        if not manifest_path.is_file():
+            continue
+        try:
+            with open(manifest_path, "r", encoding="utf-8-sig") as f:
+                manifest = json.load(f)
+            if manifest.get("format") != "crimson_browser_mod_v1":
+                continue
+            manifest["_path"] = str(entry)
+            mods.append(manifest)
+        except (json.JSONDecodeError, OSError):
+            continue
+    return mods
+
+
 # ─── Multi-file PAMT builder ────────────────────────────────────────────
 
 def build_multi_pamt(files, paz_data_len):
@@ -1635,14 +1723,21 @@ def cmd_apply():
 
     # ── Step 1: Load all modpatches ──
     mods = load_modpatches(MODS_DIR)
-    if not mods:
+    file_mods = load_file_replacement_mods(MODS_DIR)
+
+    if not mods and not file_mods:
         warn("No mods in mods/enabled/ — nothing to merge. apply only builds the overlay from enabled mods.")
         info("To remove the overlay and return to vanilla, run:  restore")
         return
 
-    print(f"Loaded {len(mods)} mod(s):")
-    for m in mods:
-        print(f"  - {m.get('name', '?')}")
+    if mods:
+        print(f"Loaded {len(mods)} JSON patch mod(s):")
+        for m in mods:
+            print(f"  - {m.get('name', '?')}")
+    if file_mods:
+        print(f"Loaded {len(file_mods)} file-replacement mod(s):")
+        for m in file_mods:
+            print(f"  - {m.get('title', '?')}")
 
     # ── Step 2: Group all changes by game_file, track source_group per file ──
     # merged[game_file] = list of (mod_name, change)
@@ -1770,6 +1865,90 @@ def cmd_apply():
             'paz_offset': paz_offset,
             'flags': fr['flags'],
         })
+
+    # ── Step 4b: Process file-replacement mods ──
+    if file_mods:
+        # We need PAMT info to determine flags for each replaced file
+        for fmod in file_mods:
+            mod_path = Path(fmod["_path"])
+            files_dir = mod_path / fmod.get("files_dir", "files")
+            title = fmod.get("title", "?")
+            if not files_dir.is_dir():
+                warn(f"[{title}] files_dir not found: {files_dir}")
+                continue
+
+            print(f"\n  File-replacement mod: {title}")
+
+            # Walk all files under files_dir, structure is: files/<group>/<vfs_path>
+            for group_dir in sorted(files_dir.iterdir()):
+                if not group_dir.is_dir():
+                    continue
+                sg = group_dir.name  # e.g. "0012"
+
+                # Load PAMT for this group if not cached
+                if sg not in pamt_cache:
+                    sg_pamt = os.path.join(GAME_DIR, sg, '0.pamt')
+                    if not os.path.isfile(sg_pamt):
+                        warn(f"  PAMT not found for group {sg}, skipping")
+                        continue
+                    print(f"  Reading {sg}/0.pamt...")
+                    sg_info = read_pamt_raw(sg_pamt)
+                    pamt_cache[sg] = build_file_index(sg_info)
+
+                file_index, full_index = pamt_cache[sg]
+
+                for file_path in sorted(group_dir.rglob("*")):
+                    if not file_path.is_file():
+                        continue
+                    # VFS path relative to group dir
+                    vfs_path = str(file_path.relative_to(group_dir)).replace(os.sep, '/')
+
+                    info_obj = resolve_game_file(vfs_path, file_index, full_index)
+                    if info_obj is None:
+                        print(f"    SKIP (not in PAMT): {vfs_path}")
+                        continue
+
+                    fr = info_obj['record']
+                    dir_path = info_obj['dir_path']
+                    filename = info_obj['filename']
+
+                    # Read replacement file
+                    with open(file_path, 'rb') as f:
+                        new_data = f.read()
+
+                    print(f"    Replacing: {vfs_path} ({len(new_data)} bytes, flags=0x{fr['flags']:04X})")
+
+                    # Compress
+                    encryption = (fr['flags'] >> 4) & 0x0F
+                    compression = fr['flags'] & 0x0F
+
+                    if compression == 2:  # LZ4
+                        comp_data = lz4.block.compress(new_data, store_size=False)
+                    elif compression == 1:  # raw/stored but comp_size != decomp_size
+                        comp_data = new_data
+                    else:
+                        comp_data = new_data
+
+                    # Encrypt if needed
+                    if encryption == 3:  # ChaCha20
+                        from crimson_crypto import encrypt_chacha20
+                        comp_data = encrypt_chacha20(comp_data, filename)
+
+                    # Add to PAZ buffer
+                    paz_offset = len(paz_buf)
+                    paz_buf += comp_data
+                    remainder = len(paz_buf) % PAZ_ALIGNMENT
+                    if remainder:
+                        paz_buf += b'\x00' * (PAZ_ALIGNMENT - remainder)
+
+                    overlay_files.append({
+                        'dir_path': dir_path,
+                        'filename': filename,
+                        'comp_size': len(comp_data),
+                        'decomp_size': len(new_data),
+                        'paz_offset': paz_offset,
+                        'flags': fr['flags'],
+                    })
 
     if not overlay_files:
         print("\nNo files to patch!")
