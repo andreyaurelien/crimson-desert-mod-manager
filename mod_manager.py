@@ -521,20 +521,48 @@ def _resolve_mod_identifier(identifier: str, files: List[Path]) -> Optional[Path
 
 def _move_enabled_mod_to_disabled(identifier: str) -> Optional[Path]:
     """Move one enabled mod to mods/disabled/ and return the destination path."""
+    # Build unified list: JSON files + file-replacement directories
     files = _enabled_mod_files_ordered()
-    if not files:
+    file_mods = load_file_replacement_mods(MODS_DIR)
+    all_mods = list(files) + [Path(fm["_path"]) for fm in file_mods]
+
+    if not all_mods:
         warn("mods/enabled/ is empty.")
         return None
-    target = _resolve_mod_identifier(identifier, files)
+
+    # Resolve by index or name
+    target: Optional[Path] = None
+    try:
+        idx = int(identifier)
+        if 1 <= idx <= len(all_mods):
+            target = all_mods[idx - 1]
+    except ValueError:
+        pass
+    if target is None:
+        id_lower = identifier.lower()
+        for p in all_mods:
+            if p.stem.lower() == id_lower or p.name.lower() == id_lower:
+                target = p
+                break
+    # Also match against manifest title for file-replacement mods
+    if target is None:
+        for fm in file_mods:
+            if identifier.lower() in fm.get("title", "").lower() or identifier.lower() in fm.get("id", "").lower():
+                target = Path(fm["_path"])
+                break
+
     if target is None:
         error(f"No enabled mod matches {identifier!r}. Use `list` to see indices.")
         return None
-    # Move to disabled instead of deleting
+
+    # Move to disabled
     os.makedirs(MODS_DISABLED_DIR, exist_ok=True)
     dest = Path(MODS_DISABLED_DIR) / target.name
     if dest.exists():
-        # If already in disabled, overwrite
-        dest.unlink()
+        if dest.is_dir():
+            shutil.rmtree(dest)
+        else:
+            dest.unlink()
     shutil.move(str(target), str(dest))
     success(f"Disabled: {target.name}  (enabled → disabled)")
     return dest
