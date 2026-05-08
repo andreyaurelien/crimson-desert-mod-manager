@@ -1721,23 +1721,38 @@ def build_papgt_with_mod(papgt_path, mod_dir_name, pamt_crc):
 def cmd_list():
     """List enabled mods."""
     mods = load_modpatches(MODS_DIR)
-    if not mods:
+    file_mods = load_file_replacement_mods(MODS_DIR)
+
+    if not mods and not file_mods:
         print("No mods in mods/enabled/")
         print(f"  Place .json modpatch files in: {MODS_DIR}")
         return
 
-    print(f"Enabled mods ({len(mods)}):")
-    for i, mod in enumerate(mods, 1):
+    total = len(mods) + len(file_mods)
+    print(f"Enabled mods ({total}):")
+    idx = 1
+    for mod in mods:
         name = mod.get('name', '?')
         desc = mod.get('description', '')[:60]
         files = set()
         for p in mod.get('patches', []):
             files.add(p['game_file'])
         src = Path(mod.get("_path", "")).name
-        print(f"  {i}) [{name}]  ({src})")
+        print(f"  {idx}) [{name}]  ({src})")
         if desc:
             print(f"      {desc}")
         print(f"      Files: {', '.join(sorted(files))}")
+        idx += 1
+    for fmod in file_mods:
+        title = fmod.get('title', '?')
+        mod_path = Path(fmod["_path"])
+        files_dir = mod_path / fmod.get("files_dir", "files")
+        file_count = sum(1 for _ in files_dir.rglob("*") if _.is_file()) if files_dir.is_dir() else 0
+        print(f"  {idx}) [{title}]  (file-replacement, {file_count} files)")
+        desc = fmod.get('description', '')[:60]
+        if desc:
+            print(f"      {desc}")
+        idx += 1
 
 
 def cmd_uninstall():
