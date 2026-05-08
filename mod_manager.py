@@ -803,26 +803,30 @@ def run_wizard():
 
         try:
             if choice == "1":
-                # List mod folders available locally
+                # List mod folders and zips available locally
                 mods_root = Path(SCRIPT_DIR) / "mods"
-                local_mods = []
+                local_mods = []  # list of (path_or_zip, label)
                 if mods_root.is_dir():
                     for entry in sorted(mods_root.iterdir()):
                         if entry.is_dir() and entry.name not in ("enabled", "disabled", "available"):
-                            # Check if it has mod files or a manifest
                             has_manifest = (entry / "manifest.json").is_file()
                             has_json = any(entry.rglob("*.json")) or any(entry.rglob("*.modpatch"))
                             if has_manifest or has_json:
                                 local_mods.append(entry)
+                    for entry in sorted(mods_root.glob("*.zip")):
+                        local_mods.append(entry)
 
                 if local_mods:
                     print("Available mod folders:")
                     for i, p in enumerate(local_mods, 1):
-                        manifest = _detect_manifest_mod(p)
-                        if manifest:
-                            print(f"  {i}) {p.name}  [{manifest.get('title', '?')}]")
+                        if p.suffix == ".zip":
+                            print(f"  {i}) 📦 {p.name}")
                         else:
-                            print(f"  {i}) {p.name}")
+                            manifest = _detect_manifest_mod(p)
+                            if manifest:
+                                print(f"  {i}) {p.name}  [{manifest.get('title', '?')}]")
+                            else:
+                                print(f"  {i}) {p.name}")
                     print(f"  0) Enter path manually")
                     pick_raw = input("> ").strip()
                     try:
@@ -830,7 +834,23 @@ def run_wizard():
                         if pick_idx == 0:
                             raw = input("Mod folder path: ").strip()
                         elif 1 <= pick_idx <= len(local_mods):
-                            raw = str(local_mods[pick_idx - 1])
+                            selected = local_mods[pick_idx - 1]
+                            if selected.suffix == ".zip":
+                                import zipfile
+                                extract_dir = mods_root / selected.stem
+                                info(f"Extracting {selected.name}...")
+                                with zipfile.ZipFile(selected, 'r') as z:
+                                    z.extractall(extract_dir)
+                                # Find the actual mod folder (may be nested)
+                                subdirs = [d for d in extract_dir.iterdir() if d.is_dir()]
+                                if len(subdirs) == 1 and (subdirs[0] / "manifest.json").is_file():
+                                    raw = str(subdirs[0])
+                                elif (extract_dir / "manifest.json").is_file():
+                                    raw = str(extract_dir)
+                                else:
+                                    raw = str(extract_dir)
+                            else:
+                                raw = str(selected)
                         else:
                             warn("Invalid choice.")
                             continue
