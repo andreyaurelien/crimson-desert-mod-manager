@@ -803,8 +803,43 @@ def run_wizard():
 
         try:
             if choice == "1":
-                raw = input("Mod folder path: ").strip()
+                # List mod folders available locally
+                mods_root = Path(SCRIPT_DIR) / "mods"
+                local_mods = []
+                if mods_root.is_dir():
+                    for entry in sorted(mods_root.iterdir()):
+                        if entry.is_dir() and entry.name not in ("enabled", "disabled", "available"):
+                            # Check if it has mod files or a manifest
+                            has_manifest = (entry / "manifest.json").is_file()
+                            has_json = any(entry.rglob("*.json")) or any(entry.rglob("*.modpatch"))
+                            if has_manifest or has_json:
+                                local_mods.append(entry)
+
+                if local_mods:
+                    print("Available mod folders:")
+                    for i, p in enumerate(local_mods, 1):
+                        manifest = _detect_manifest_mod(p)
+                        if manifest:
+                            print(f"  {i}) {p.name}  [{manifest.get('title', '?')}]")
+                        else:
+                            print(f"  {i}) {p.name}")
+                    print(f"  0) Enter path manually")
+                    pick_raw = input("> ").strip()
+                    try:
+                        pick_idx = int(pick_raw)
+                        if pick_idx == 0:
+                            raw = input("Mod folder path: ").strip()
+                        elif 1 <= pick_idx <= len(local_mods):
+                            raw = str(local_mods[pick_idx - 1])
+                        else:
+                            warn("Invalid choice.")
+                            continue
+                    except ValueError:
+                        raw = pick_raw  # treat as path
+                else:
+                    raw = input("Mod folder path: ").strip()
                 if not raw:
+                    continue
                     continue
                 root = str(_clean_user_path(raw))
                 cmd_install_from_folder(root, recursive=True, pick=True)
