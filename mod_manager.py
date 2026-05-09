@@ -2058,11 +2058,13 @@ def cmd_apply():
                     # Compress
                     encryption = (fr['flags'] >> 4) & 0x0F
                     compression = fr['flags'] & 0x0F
+                    out_flags = fr['flags']
 
                     if compression == 2:  # LZ4
                         comp_data = lz4.block.compress(new_data, store_size=False)
-                    elif compression == 1:  # raw/stored but comp_size != decomp_size
+                    elif compression == 1:  # Patrical (proprietary) — we can't recompress
                         comp_data = new_data
+                        out_flags = (encryption << 4) | 0x00  # store as raw
                     else:
                         comp_data = new_data
 
@@ -2084,7 +2086,7 @@ def cmd_apply():
                         'comp_size': len(comp_data),
                         'decomp_size': len(new_data),
                         'paz_offset': paz_offset,
-                        'flags': fr['flags'],
+                        'flags': out_flags,
                     })
 
     if not overlay_files:
